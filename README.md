@@ -1,5 +1,8 @@
 [![Build Status](https://travis-ci.org/matsim-scenarios/matsim-berlin.svg?branch=5.5.x)](https://travis-ci.org/matsim-scenarios/matsim-berlin)
 
+# Homework 2 in MATSim class at TU Berlin
+This is a fork of the Open Berlin Scenario, used for working on the second homework of MATSim class in summer semester 2022 at TU Berlin.
+
 # The MATSim Open Berlin Scenario
 ![Berlin MATSim network and agents)](scenarios/berlin-v5.5-10pct/visualization-berlin.png "Berlin MATSim network and agents")
 

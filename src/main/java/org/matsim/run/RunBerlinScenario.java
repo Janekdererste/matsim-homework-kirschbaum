@@ -23,11 +23,16 @@ import ch.sbb.matsim.routing.pt.raptor.RaptorIntermodalAccessEgress;
 import ch.sbb.matsim.routing.pt.raptor.SwissRailRaptorModule;
 import com.google.inject.Singleton;
 import org.apache.log4j.Logger;
+import org.geotools.geometry.jts.JTSFactoryFinder;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.geom.GeometryFactory;
 import org.matsim.analysis.RunPersonTripAnalysis;
 import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.TransportMode;
-import org.matsim.api.core.v01.population.Person;
+import org.matsim.api.core.v01.network.Link;
+import org.matsim.api.core.v01.population.*;
 import org.matsim.contrib.drt.routing.DrtRoute;
 import org.matsim.contrib.drt.routing.DrtRouteFactory;
 import org.matsim.core.config.Config;
@@ -39,23 +44,27 @@ import org.matsim.core.config.groups.QSimConfigGroup.TrafficDynamics;
 import org.matsim.core.config.groups.VspExperimentalConfigGroup;
 import org.matsim.core.controler.AbstractModule;
 import org.matsim.core.controler.Controler;
+import org.matsim.core.controler.OutputDirectoryHierarchy;
 import org.matsim.core.controler.OutputDirectoryLogging;
 import org.matsim.core.gbl.Gbl;
 import org.matsim.core.gbl.MatsimRandom;
+import org.matsim.core.population.PopulationUtils;
 import org.matsim.core.population.routes.RouteFactories;
+import org.matsim.core.population.routes.RouteUtils;
 import org.matsim.core.router.AnalysisMainModeIdentifier;
+import org.matsim.core.router.TripStructureUtils;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.core.scoring.functions.ScoringParametersForPerson;
 import org.matsim.core.utils.geometry.transformations.TransformationFactory;
+import org.matsim.core.utils.gis.ShapeFileReader;
 import org.matsim.prepare.population.AssignIncome;
 import org.matsim.run.drt.OpenBerlinIntermodalPtDrtRouterModeIdentifier;
 import org.matsim.run.drt.RunDrtOpenBerlinScenario;
 import playground.vsp.scoring.IncomeDependentUtilityOfMoneyPersonScoringParameters;
 
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.matsim.core.config.groups.ControlerConfigGroup.RoutingAlgorithmType.FastAStarLandmarks;
 
@@ -74,7 +83,7 @@ public final class RunBerlinScenario {
 		}
 		
 		if ( args.length==0 ) {
-			args = new String[] {"scenarios/berlin-v5.5-10pct/input/berlin-v5.5-10pct.config.xml"}  ;
+			args = new String[] {"scenarios/berlin-v5.5-1pct/input/berlin-v5.5-1pct.config.xml"}  ;
 		}
 
 		Config config = prepareConfig( args ) ;
@@ -147,6 +156,135 @@ public final class RunBerlinScenario {
 		}
 
 		AssignIncome.assignIncomeToPersonSubpopulationAccordingToGermanyAverage(scenario.getPopulation());
+
+		/* ######################## */
+
+		var network = scenario.getNetwork();	// read scenario
+		//var shapeFileName = "shp/Ring_4326.shp";			// read shapefile
+		var shapeFileName = "C:/Users/Julius/Desktop/shp/Ring_31468.shp";			// read shapefile
+		ArrayList<String> affectedLinkIds = new ArrayList<>();
+		var features = ShapeFileReader.getAllFeatures(shapeFileName);
+		var geometries = features.stream()
+				.map(simpleFeature -> (Geometry) simpleFeature.getDefaultGeometry())
+				.collect(Collectors.toList());
+		var geometry = geometries.get(0);		// geometry containing polygon at Str. d. 17. Juni
+		GeometryFactory geometryFactory = JTSFactoryFinder.getGeometryFactory();
+		// iterate over all links of the network to check if they are at Str. d. 17. Juni
+		for (Link link : network.getLinks().values()) {
+			// intersect polygon with link center point
+			if (geometry.contains(
+					// MATSims Coord object has to be transformed to a Coordinate object
+					geometryFactory.createPoint(
+							new Coordinate(
+									link.getCoord().getX(),
+									link.getCoord().getY()
+							)
+					)
+			)
+			) {
+				if (link.getAllowedModes().contains("car")) {
+					affectedLinkIds.add(link.getId().toString());
+					Set<String> modes = new HashSet<>(link.getAllowedModes());
+					modes.remove("car");
+					link.setAllowedModes(modes);
+				}
+			}
+		}
+
+		Population population = scenario.getPopulation();
+
+		// ANSATZ 1:
+
+		// Fehler: findet keine Route von Node x zu Node y für mode car
+
+		// Unser Code: iteriert über alle person -> plan -> trip -> legs -> route links
+		// Wenn ein leg (car) über einen gesperrten Link führt, werden alle legs des trips gelöscht.
+		// Problem dabei (wahrscheinlich): Geht der Hinweg durch gesperrten S-Bahnring, kann nicht mehr der Modus car
+		// genutzt werden, stattdessen dann pt/bike. Angenommen, der Rückweg geht außen um den S-Bahnring und die Legs
+		// werden somit nicht gelöscht. Dann ist das Auto für den Rückweg nicht verfügbar, da für den Hinweg jetzt z.B.
+		// pt genutzt wurde statt car => Fehler.
+
+		/*
+		for (Person person : population.getPersons().values()){
+			for (Plan plan : person.getPlans()){
+				List<Leg> legsToBeRemoved = new ArrayList<>();
+				List<TripStructureUtils.Trip> trips = TripStructureUtils.getTrips(plan);
+				for (TripStructureUtils.Trip trip : trips){
+					boolean removeTripLegs = false;
+					List<Leg> tripLegs = trip.getLegsOnly();
+					List<PlanElement> tripElements = trip.getTripElements().stream().filter(PlanElement.)
+					for (Leg leg : tripLegs){
+						try {
+							if (leg.getMode().equals("car")) {
+								String routeDescription = leg.getRoute().getRouteDescription();
+								String[] linksUsed = routeDescription.split(" ");
+								for (String linkUsed : linksUsed) {
+									if (affectedLinkIds.contains(linkUsed)) {
+										removeTripLegs = true;
+										break;
+									}
+								}
+							}
+						}
+						catch (NullPointerException e){
+							System.out.println("Leg has no route! Continuing...");
+						}
+						if (removeTripLegs){ break; }
+					}
+					if (removeTripLegs){
+						legsToBeRemoved.addAll(tripLegs);
+					}
+				}
+				for (Leg leg : legsToBeRemoved){
+					PopulationUtils.removeLeg(plan, PopulationUtils.getActLegIndex(plan, leg));
+				}
+			}
+		}*/
+
+		// 	ANSATZ 2:
+
+		// Kein Fehler, aber ca. 10% weniger Trips im Output als im Base Scenario (161.000 ggü. 182.000)
+
+		// Unser Code: iteriert über alle person -> plan -> leg -> route links
+		// Wenn ein leg (car) über einen gesperrten Link führt, werden alle legs des plans(!) gelöscht.
+		int i = 0;
+		int max = population.getPersons().values().size();
+		for (Person person : population.getPersons().values()) {
+			// for seeing progress...
+			i++;
+			if (i % 100 == 0) {
+				System.out.println("Person " + i + "/" + max + "(" + (float) i / (float) max * 100 + "%)" + ": " + person.getId().toString());
+			}
+			//
+			for (Plan plan : person.getPlans()) {
+				boolean removePlanLegs = false;
+				List<Leg> legs = PopulationUtils.getLegs(plan);
+				for (Leg leg : legs) {
+					if (leg.getMode().equals("car")) {
+						try {
+							String routeDescription = leg.getRoute().getRouteDescription();
+							String[] linksUsed = routeDescription.split(" ");
+							for (String linkUsed : linksUsed) {
+								if (!removePlanLegs && affectedLinkIds.contains(linkUsed)) {
+									//PopulationUtils.removeLeg(plan, PopulationUtils.getActLegIndex(plan, leg));
+									removePlanLegs = true;
+									break;
+								}
+							}
+						}
+						catch (NullPointerException e){
+							// tritt nicht mehr auf.
+							System.out.println("NullPointerException: Route for Leg not found! Continuing...");
+						}
+					}
+				}
+				if (removePlanLegs){
+					for (Leg leg : legs){
+						PopulationUtils.removeLeg(plan, PopulationUtils.getActLegIndex(plan, leg));
+					}
+				}
+			}
+		}
 		return scenario;
 	}
 
@@ -181,7 +319,9 @@ public final class RunBerlinScenario {
 		final Config config = ConfigUtils.loadConfig( args[ 0 ], customModulesAll );
 		
 		config.controler().setRoutingAlgorithmType( FastAStarLandmarks );
-		
+		config.controler().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.deleteDirectoryIfExists);
+		config.controler().setLastIteration(1);//////////////////////////////////////////////////////////////////////////////
+
 		config.subtourModeChoice().setProbaForRandomSingleTripMode( 0.5 );
 		
 		config.plansCalcRoute().setRoutingRandomness( 3. );
