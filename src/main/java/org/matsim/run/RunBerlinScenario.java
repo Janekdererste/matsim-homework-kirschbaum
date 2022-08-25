@@ -19,7 +19,6 @@
 
 package org.matsim.run;
 
-import ch.sbb.matsim.routing.pt.raptor.RaptorIntermodalAccessEgress;
 import ch.sbb.matsim.routing.pt.raptor.SwissRailRaptorModule;
 import com.google.inject.Singleton;
 import org.apache.log4j.Logger;
@@ -50,7 +49,6 @@ import org.matsim.core.gbl.Gbl;
 import org.matsim.core.gbl.MatsimRandom;
 import org.matsim.core.population.PopulationUtils;
 import org.matsim.core.population.routes.RouteFactories;
-import org.matsim.core.population.routes.RouteUtils;
 import org.matsim.core.router.AnalysisMainModeIdentifier;
 import org.matsim.core.router.TripStructureUtils;
 import org.matsim.core.scenario.ScenarioUtils;
@@ -161,7 +159,7 @@ public final class RunBerlinScenario {
 
 		var network = scenario.getNetwork();	// read scenario
 		//var shapeFileName = "shp/Ring_4326.shp";			// read shapefile
-		var shapeFileName = "C:/Users/Julius/Desktop/shp/Ring_31468.shp";			// read shapefile
+		var shapeFileName = "shp/Ring_31468.shp";			// read shapefile
 		ArrayList<String> affectedLinkIds = new ArrayList<>();
 		var features = ShapeFileReader.getAllFeatures(shapeFileName);
 		var geometries = features.stream()
@@ -172,22 +170,11 @@ public final class RunBerlinScenario {
 		// iterate over all links of the network to check if they are at Str. d. 17. Juni
 		for (Link link : network.getLinks().values()) {
 			// intersect polygon with link center point
-			if (geometry.contains(
-					// MATSims Coord object has to be transformed to a Coordinate object
-					geometryFactory.createPoint(
-							new Coordinate(
-									link.getCoord().getX(),
-									link.getCoord().getY()
-							)
-					)
-			)
-			) {
-				if (link.getAllowedModes().contains("car")) {
-					affectedLinkIds.add(link.getId().toString());
-					Set<String> modes = new HashSet<>(link.getAllowedModes());
-					modes.remove("car");
-					link.setAllowedModes(modes);
-				}
+			if (isCovered(geometry, link, geometryFactory) && link.getAllowedModes().contains("car")) {
+				affectedLinkIds.add(link.getId().toString());
+				Set<String> modes = new HashSet<>(link.getAllowedModes());
+				modes.remove("car");link.setAllowedModes(modes);
+
 			}
 		}
 
@@ -198,55 +185,70 @@ public final class RunBerlinScenario {
 		// Fehler: findet keine Route von Node x zu Node y für mode car
 
 		// Unser Code: iteriert über alle person -> plan -> trip -> legs -> route links
-		// Wenn ein leg (car) über einen gesperrten Link führt, werden alle legs des trips gelöscht.
-		// Problem dabei (wahrscheinlich): Geht der Hinweg durch gesperrten S-Bahnring, kann nicht mehr der Modus car
+		// Wenn ein leg (car) über einen gesperrten Link führt, werden alle activities und legs des trips gelöscht,
+		// bis auf den ersten Leg. Dessen Attribute werden gelöscht und der mode auf "car" gesetzt.
+		// Problem dabei vlt.: Geht der Hinweg durch gesperrten S-Bahnring, kann nicht mehr der Modus car
 		// genutzt werden, stattdessen dann pt/bike. Angenommen, der Rückweg geht außen um den S-Bahnring und die Legs
 		// werden somit nicht gelöscht. Dann ist das Auto für den Rückweg nicht verfügbar, da für den Hinweg jetzt z.B.
 		// pt genutzt wurde statt car => Fehler.
 
-		/*
-		for (Person person : population.getPersons().values()){
+		int i = 0;
+		int max = population.getPersons().values().size();
+		for (Person person : population.getPersons().values()) {
+			// for seeing progress...
+			i++;
+			if (i % 100 == 0) {
+				System.out.println("Person " + i + "/" + max + "(" + Math.round((float) i / (float) max * 100) + "%)" + ": " + person.getId().toString());
+			}
 			for (Plan plan : person.getPlans()){
-				List<Leg> legsToBeRemoved = new ArrayList<>();
+				List<PlanElement> tripElementsToBeRemoved = new ArrayList<>();
 				List<TripStructureUtils.Trip> trips = TripStructureUtils.getTrips(plan);
 				for (TripStructureUtils.Trip trip : trips){
 					boolean removeTripLegs = false;
-					List<Leg> tripLegs = trip.getLegsOnly();
-					List<PlanElement> tripElements = trip.getTripElements().stream().filter(PlanElement.)
-					for (Leg leg : tripLegs){
-						try {
-							if (leg.getMode().equals("car")) {
-								String routeDescription = leg.getRoute().getRouteDescription();
-								String[] linksUsed = routeDescription.split(" ");
-								for (String linkUsed : linksUsed) {
-									if (affectedLinkIds.contains(linkUsed)) {
-										removeTripLegs = true;
-										break;
-									}
+					for (Leg leg : trip.getLegsOnly()){
+						if (leg.getMode().equals("car") && leg.getRoute() != null) {
+							String[] linksUsed = leg.getRoute().getRouteDescription().split(" ");
+							for (String linkUsed : linksUsed) {
+								if (affectedLinkIds.contains(linkUsed)) {
+									removeTripLegs = true;
+									break;
 								}
 							}
 						}
-						catch (NullPointerException e){
+						else if (leg.getRoute() == null) {
 							System.out.println("Leg has no route! Continuing...");
 						}
 						if (removeTripLegs){ break; }
 					}
 					if (removeTripLegs){
-						legsToBeRemoved.addAll(tripLegs);
+						tripElementsToBeRemoved.addAll(trip.getTripElements());
+						Leg newLeg = PopulationUtils.createLeg("walk");
+						int index = PopulationUtils.getActLegIndex(plan, trip.getTripElements().get(0));
+						plan.getPlanElements().add(index, newLeg);
 					}
 				}
-				for (Leg leg : legsToBeRemoved){
-					PopulationUtils.removeLeg(plan, PopulationUtils.getActLegIndex(plan, leg));
+				for (PlanElement tripElement: tripElementsToBeRemoved){
+					// Wir haben das auch mit PopulationUtils.removeActivity() und mit einer angepassten Methode
+					// removeActivitySetPrevLegCar versucht (s.u.). Ist äquivalent zu dem was wir in Z. 224-227 und
+					// Z. 234 gemacht haben
+					plan.getPlanElements().remove(PopulationUtils.getActLegIndex(plan, tripElement));
+					/*
+					if (tripElement.toString().contains("interaction")){
+						removeActivitySetPrevLegCar(plan, PopulationUtils.getActLegIndex(plan, tripElement));
+					}
+					 */
 				}
 			}
-		}*/
+		}
 
 		// 	ANSATZ 2:
+		// HABEN WIR VERWORFEN.
 
 		// Kein Fehler, aber ca. 10% weniger Trips im Output als im Base Scenario (161.000 ggü. 182.000)
 
 		// Unser Code: iteriert über alle person -> plan -> leg -> route links
 		// Wenn ein leg (car) über einen gesperrten Link führt, werden alle legs des plans(!) gelöscht.
+		/*
 		int i = 0;
 		int max = population.getPersons().values().size();
 		for (Person person : population.getPersons().values()) {
@@ -284,7 +286,7 @@ public final class RunBerlinScenario {
 					}
 				}
 			}
-		}
+		}*/
 		return scenario;
 	}
 
@@ -320,7 +322,9 @@ public final class RunBerlinScenario {
 		
 		config.controler().setRoutingAlgorithmType( FastAStarLandmarks );
 		config.controler().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.deleteDirectoryIfExists);
+
 		config.controler().setLastIteration(1);//////////////////////////////////////////////////////////////////////////////
+
 
 		config.subtourModeChoice().setProbaForRandomSingleTripMode( 0.5 );
 		
@@ -398,5 +402,40 @@ public final class RunBerlinScenario {
 		log.warn( "Population downsampled to " + map.size() + " agents." ) ;
 	}
 
+	private static boolean isCovered(Geometry geometry, Link link, GeometryFactory geometryFactory){
+		return geometry.contains(
+				// MATSims Coord object has to be transformed to a Coordinate object
+				geometryFactory.createPoint(
+						new Coordinate(
+								link.getCoord().getX(),
+								link.getCoord().getY()
+						)
+				)
+		);
+	}
+
+	private static void removeActivitySetPrevLegCar(Plan plan, int index) {
+		if (index % 2 == 0 && index >= 0 && index <= plan.getPlanElements().size() - 1) {
+			if (plan.getPlanElements().size() == 1) {
+				log.warn("" + plan + "[index=" + index + " only one act. nothing removed]");
+			} else if (index == 0) {
+				plan.getPlanElements().remove(index + 1);
+				plan.getPlanElements().remove(index);
+			} else if (index == plan.getPlanElements().size() - 1) {
+				plan.getPlanElements().remove(index);
+				plan.getPlanElements().remove(index - 1);
+			} else {
+				Leg prev_leg = (Leg)plan.getPlanElements().get(index - 1);
+				prev_leg.setDepartureTimeUndefined();
+				prev_leg.setTravelTimeUndefined();
+				prev_leg.setRoute((Route)null);
+				prev_leg.setMode("car");
+				plan.getPlanElements().remove(index + 1);
+				plan.getPlanElements().remove(index);
+			}
+		} else {
+			log.warn("" + plan + "[index=" + index + " is wrong. nothing removed]");
+		}
+	}
 }
 
