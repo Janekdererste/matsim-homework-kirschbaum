@@ -47,7 +47,9 @@ import org.matsim.core.controler.OutputDirectoryHierarchy;
 import org.matsim.core.controler.OutputDirectoryLogging;
 import org.matsim.core.gbl.Gbl;
 import org.matsim.core.gbl.MatsimRandom;
+import org.matsim.core.network.algorithms.MultimodalNetworkCleaner;
 import org.matsim.core.population.PopulationUtils;
+import org.matsim.core.population.routes.NetworkRoute;
 import org.matsim.core.population.routes.RouteFactories;
 import org.matsim.core.router.AnalysisMainModeIdentifier;
 import org.matsim.core.router.TripStructureUtils;
@@ -160,7 +162,13 @@ public final class RunBerlinScenario {
 		var network = scenario.getNetwork();	// read scenario
 		//var shapeFileName = "shp/Ring_4326.shp";			// read shapefile
 		var shapeFileName = "shp/Ring_31468.shp";			// read shapefile
-		ArrayList<String> affectedLinkIds = new ArrayList<>();
+
+		/*
+		Janek has changed this: Instead of using the raw strings of the Ids one can simply use the Ids themselves.
+		These Data-Structures are made for comparison and finding stuff again.
+		 */
+		//ArrayList<String> affectedLinkIds = new ArrayList<>();
+		Set<Id<Link>> affectedLinkIds = new HashSet<>();
 		var features = ShapeFileReader.getAllFeatures(shapeFileName);
 		var geometries = features.stream()
 				.map(simpleFeature -> (Geometry) simpleFeature.getDefaultGeometry())
@@ -171,12 +179,37 @@ public final class RunBerlinScenario {
 		for (Link link : network.getLinks().values()) {
 			// intersect polygon with link center point
 			if (isCovered(geometry, link, geometryFactory) && link.getAllowedModes().contains("car")) {
-				affectedLinkIds.add(link.getId().toString());
+				/*
+				Janek has changed this: As described above, we can simpply use the id instead of its backing String
+				representation.
+				 */
+				affectedLinkIds.add(link.getId());
 				Set<String> modes = new HashSet<>(link.getAllowedModes());
-				modes.remove("car");link.setAllowedModes(modes);
-
+				modes.remove("car");
+				link.setAllowedModes(modes);
 			}
 		}
+
+		/*
+		Janek has changed this: As the error message stated, when removing links from the network (disable car on links
+		removes those links  from the car network. (The router splits the network into multiple networks, one per mode)),
+		it is possible that the network is not connected anymore. The routing algorithm can't handle this case
+
+		The error message:
+
+		2022-08-26T08:40:09,715  WARN Dijkstra:304 No route was found from node 28296542 to node 26881972. Some possible reasons:
+		2022-08-26T08:40:09,715  WARN Dijkstra:305   * Network is not connected.  Run NetworkCleaner().
+		2022-08-26T08:40:09,715  WARN Dijkstra:306   * Network for considered mode does not even exist.  Modes need to be entered for each link in network.xml.
+		2022-08-26T08:40:09,715  WARN Dijkstra:307   * Network for considered mode is not connected to starting or ending point of route.  Setting insertingAccessEgressWalk to true may help.
+		2022-08-26T08:40:09,715  WARN Dijkstra:308 This will now return null, but it may fail later with a null pointer exception.
+
+		Option 1 does the trick
+
+		This could actually introduce a new error, where the cleaner removes links, which are referenced by activities.
+		In this case it would be necessary to set the linkId of such activities to null, so that the simulation can assign
+		new closest links to those activities. - For the 1% sample, this doesn't seem to be the case.
+		 */
+		new MultimodalNetworkCleaner(scenario.getNetwork()).run(Set.of(TransportMode.car));
 
 		Population population = scenario.getPopulation();
 
@@ -207,9 +240,18 @@ public final class RunBerlinScenario {
 					boolean removeTripLegs = false;
 					for (Leg leg : trip.getLegsOnly()){
 						if (leg.getMode().equals("car") && leg.getRoute() != null) {
-							String[] linksUsed = leg.getRoute().getRouteDescription().split(" ");
-							for (String linkUsed : linksUsed) {
-								if (affectedLinkIds.contains(linkUsed)) {
+
+							/*
+							Janek has changed this: Again using Ids instead of string representation for comparison. This
+							speeds up the code a lot.
+
+							The general Route interface doesn't provide the 'getLinkIds' method. We therefore have to cast
+							the route into a network route. This is okay here, because we know that all car legs should have
+							a NetworkRoute in our scenario.
+							 */
+							var route = (NetworkRoute) leg.getRoute();
+							for (var id : route.getLinkIds()) {
+								if (affectedLinkIds.contains(id)) {
 									removeTripLegs = true;
 									break;
 								}
@@ -222,7 +264,7 @@ public final class RunBerlinScenario {
 					}
 					if (removeTripLegs){
 						tripElementsToBeRemoved.addAll(trip.getTripElements());
-						Leg newLeg = PopulationUtils.createLeg("walk");
+						Leg newLeg = PopulationUtils.createLeg("car");
 						int index = PopulationUtils.getActLegIndex(plan, trip.getTripElements().get(0));
 						plan.getPlanElements().add(index, newLeg);
 					}
